@@ -1,0 +1,669 @@
+diff --git a/src/network.h b/src/network.h
+--- a/src/network.h
++++ b/src/network.h
+@@ -1,1 +1,1 @@
+ // standard includes
++#include <string>
+ #include <tuple>
+ #include <utility>
++#include <vector>
+@@ -1,1 +1,1 @@
+   enum af_e : int {
+     IPV4,  ///< IPv4 only
+     BOTH  ///< IPv4 and IPv6
+   };
++
++  /**
++   * @brief Network adapter information used for interface-aware discovery.
++   */
++  struct network_adapter_t {
++    std::string name;  ///< Human-readable interface name.
++    std::string id;  ///< Native/stable interface identifier where available.
++    std::string description;  ///< Platform-provided adapter description.
++    std::vector<std::string> ipv4_addresses;  ///< IPv4 unicast addresses currently assigned to the adapter.
++    bool is_up {false};  ///< Whether the adapter is operational.
++    bool is_loopback {false};  ///< Whether this is a loopback adapter.
++    bool supports_multicast {false};  ///< Whether the adapter supports multicast.
++  };
++
++  /**
++   * @brief Enumerate host network adapters.
++   *
++   * @return Current adapters and their IPv4 addresses.
++   */
++  std::vector<network_adapter_t> get_network_adapters();
+ 
+   /**
+    * @brief Convert configuration text to a network enum value.
+diff --git a/src/network.cpp b/src/network.cpp
+--- a/src/network.cpp
++++ b/src/network.cpp
+@@ -1,1 +1,1 @@
+ // standard includes
+ #include <algorithm>
++#include <memory>
+ #include <sstream>
++#include <unordered_map>
+ 
+ // local includes
+ #include "config.h"
+ #include "logging.h"
+ #include "network.h"
+ #include "utility.h"
++
++#ifdef _WIN32
++  // platform includes
++  #include <iphlpapi.h>
++  #include <ws2tcpip.h>
++
++  // local includes
++  #include "platform/windows/utf_utils.h"
++#else
++  // platform includes
++  #include <arpa/inet.h>
++  #include <ifaddrs.h>
++  #include <net/if.h>
++#endif
+@@ -1,1 +1,1 @@
+ namespace net {
+@@ -1,1 +1,1 @@
+   std::vector<ip::network_v6> lan_ips_v6 {
+     ip::make_network_v6("fc00::/7"sv),
+     ip::make_network_v6("fe80::/64"sv),
+   };
++
++  std::vector<network_adapter_t> get_network_adapters() {
++    std::vector<network_adapter_t> adapters;
++
++#ifdef _WIN32
++    constexpr ULONG flags = GAA_FLAG_INCLUDE_PREFIX;
++    ULONG buffer_size = 0;
++    auto result = GetAdaptersAddresses(AF_INET, flags, nullptr, nullptr, &buffer_size);
++    if (result != ERROR_BUFFER_OVERFLOW || buffer_size == 0) {
++      if (result != NO_ERROR && result != ERROR_NO_DATA) {
++        BOOST_LOG(warning) << "GetAdaptersAddresses() failed while sizing the adapter buffer: "sv << result;
++      }
++      return adapters;
++    }
++
++    std::vector<unsigned char> buffer(buffer_size);
++    auto *addresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
++    result = GetAdaptersAddresses(AF_INET, flags, nullptr, addresses, &buffer_size);
++    if (result != NO_ERROR) {
++      BOOST_LOG(warning) << "GetAdaptersAddresses() failed: "sv << result;
++      return adapters;
++    }
++
++    for (auto *current = addresses; current != nullptr; current = current->Next) {
++      network_adapter_t adapter;
++      if (current->FriendlyName != nullptr) {
++        adapter.name = utf_utils::to_utf8(current->FriendlyName);
++      }
++      if (current->AdapterName != nullptr) {
++        adapter.id = current->AdapterName;
++      }
++      if (current->Description != nullptr) {
++        adapter.description = utf_utils::to_utf8(current->Description);
++      }
++      if (adapter.name.empty()) {
++        adapter.name = adapter.id;
++      }
++
++      adapter.is_up = current->OperStatus == IfOperStatusUp;
++      adapter.is_loopback = current->IfType == IF_TYPE_SOFTWARE_LOOPBACK;
++      adapter.supports_multicast = (current->Flags & IP_ADAPTER_NO_MULTICAST) == 0;
++
++      for (auto *unicast = current->FirstUnicastAddress; unicast != nullptr; unicast = unicast->Next) {
++        if (unicast->Address.lpSockaddr == nullptr || unicast->Address.lpSockaddr->sa_family != AF_INET) {
++          continue;
++        }
++
++        const auto *sockaddr = reinterpret_cast<const SOCKADDR_IN *>(unicast->Address.lpSockaddr);
++        char address[INET_ADDRSTRLEN] {};
++        if (InetNtopA(AF_INET, &sockaddr->sin_addr, address, sizeof(address)) != nullptr) {
++          adapter.ipv4_addresses.emplace_back(address);
++        }
++      }
++
++      adapters.emplace_back(std::move(adapter));
++    }
++#else
++    ifaddrs *raw_addresses = nullptr;
++    if (getifaddrs(&raw_addresses) != 0 || raw_addresses == nullptr) {
++      BOOST_LOG(warning) << "getifaddrs() failed while enumerating network adapters"sv;
++      return adapters;
++    }
++    std::unique_ptr<ifaddrs, decltype(&freeifaddrs)> addresses {raw_addresses, freeifaddrs};
++
++    std::unordered_map<std::string, std::size_t> adapter_indexes;
++    for (auto *current = raw_addresses; current != nullptr; current = current->ifa_next) {
++      if (current->ifa_name == nullptr) {
++        continue;
++      }
++
++      const std::string name {current->ifa_name};
++      auto [index_it, inserted] = adapter_indexes.try_emplace(name, adapters.size());
++      if (inserted) {
++        network_adapter_t adapter;
++        adapter.name = name;
++        adapter.id = name;
++        adapters.emplace_back(std::move(adapter));
++      }
++
++      auto &adapter = adapters[index_it->second];
++      adapter.is_up = adapter.is_up || ((current->ifa_flags & IFF_UP) != 0);
++      adapter.is_loopback = adapter.is_loopback || ((current->ifa_flags & IFF_LOOPBACK) != 0);
++      adapter.supports_multicast = adapter.supports_multicast || ((current->ifa_flags & IFF_MULTICAST) != 0);
++
++      if (current->ifa_addr == nullptr || current->ifa_addr->sa_family != AF_INET) {
++        continue;
++      }
++
++      const auto *sockaddr = reinterpret_cast<const sockaddr_in *>(current->ifa_addr);
++      char address[INET_ADDRSTRLEN] {};
++      if (inet_ntop(AF_INET, &sockaddr->sin_addr, address, sizeof(address)) != nullptr) {
++        adapter.ipv4_addresses.emplace_back(address);
++      }
++    }
++#endif
++
++    return adapters;
++  }
+ 
+   /**
+    * @brief Convert configuration text to a network enum value.
+diff --git a/cmake/targets/windows.cmake b/cmake/targets/windows.cmake
+--- a/cmake/targets/windows.cmake
++++ b/cmake/targets/windows.cmake
+@@ -1,1 +1,1 @@
+ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
+         $<TARGET_OBJECTS:sunshine_rc_object>
++        Iphlpapi.lib
+         Windowsapp.lib
+         Wtsapi32.lib
+         version.lib)
+diff --git a/src/config.h b/src/config.h
+--- a/src/config.h
++++ b/src/config.h
+@@ -1,1 +1,1 @@
+     std::uint16_t port;  ///< TCP port used by Sunshine services.
+     std::string address_family;  ///< Address family requested for listening sockets.
+     std::string bind_address;  ///< Local address Sunshine should bind to.
++    std::vector<std::string> upnp_adapters;  ///< Candidate adapters used for IPv4 UPnP discovery.
++    std::string upnp_adapter_blacklist;  ///< Optional regex excluding adapters from IPv4 UPnP discovery.
+ 
+     std::string log_file;  ///< Path to the configured log file.
+diff --git a/src/config.cpp b/src/config.cpp
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -1,1 +1,1 @@
+     47989,  // Base port number
+     "ipv4",  // Address family
+     {},  // Bind address
++    {},  // UPnP adapters (empty keeps legacy automatic interface selection)
++    {},  // UPnP adapter blacklist
+     platf::appdata().string() + "/sunshine.log",  // log file
+     false,  // notify_pre_releases
+@@ -1,1 +1,1 @@
+     string_restricted_f(vars, "address_family", sunshine.address_family, {"ipv4"sv, "both"sv});
+     string_f(vars, "bind_address", sunshine.bind_address);
++    string_list_f(vars, "upnp_adapters", sunshine.upnp_adapters);
++    string_f(vars, "upnp_adapter_blacklist", sunshine.upnp_adapter_blacklist);
+ 
+     bool upnp = false;
+diff --git a/tests/integration/test_config_consistency.cpp b/tests/integration/test_config_consistency.cpp
+--- a/tests/integration/test_config_consistency.cpp
++++ b/tests/integration/test_config_consistency.cpp
+@@ -1,1 +1,1 @@
+-      std::regex(R"DELIM((?:string_f|path_f|string_restricted_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
++      std::regex(R"DELIM((?:string_f|path_f|string_restricted_f|string_list_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
+diff --git a/src/upnp.cpp b/src/upnp.cpp
+--- a/src/upnp.cpp
++++ b/src/upnp.cpp
+@@ -1,1 +1,1 @@
+ // standard includes
++#include <algorithm>
++#include <optional>
++#include <regex>
+ #include <stddef.h>  // workaround for type_t error in miniupnpc 2.3.3, see https://github.com/miniupnp/miniupnp/commit/e263ab6f56c382e10fed31347ec68095d691a0e8
++#include <unordered_set>
+@@ -1,1 +1,1 @@
+   struct mapping_t {
+@@ -1,1 +1,1 @@
+     std::string description;  ///< Human-readable UPnP lease description advertised to the gateway.
+   };
++
++  struct discovery_target_t {
++    std::string adapter_name;
++    std::string adapter_id;
++    std::string address;
++  };
++
++  static bool adapter_matches_selector(const net::network_adapter_t &adapter, const std::string_view selector) {
++    if (adapter.name == selector || adapter.id == selector || adapter.description == selector) {
++      return true;
++    }
++
++    return std::ranges::find(adapter.ipv4_addresses, selector) != adapter.ipv4_addresses.end();
++  }
++
++  static bool adapter_is_eligible(const net::network_adapter_t &adapter) {
++    return adapter.is_up &&
++           !adapter.is_loopback &&
++           adapter.supports_multicast &&
++           !adapter.ipv4_addresses.empty();
++  }
++
++  static std::vector<discovery_target_t> get_ipv4_discovery_targets() {
++    const auto adapters = net::get_network_adapters();
++    std::vector<discovery_target_t> targets;
++    std::unordered_set<std::string> seen_addresses;
++
++    std::optional<std::regex> blacklist;
++    if (!config::sunshine.upnp_adapter_blacklist.empty()) {
++      try {
++        blacklist.emplace(config::sunshine.upnp_adapter_blacklist,
++                          std::regex_constants::ECMAScript | std::regex_constants::icase);
++      } catch (const std::regex_error &err) {
++        BOOST_LOG(error) << "Invalid UPnP adapter blacklist regex: "sv << err.what();
++        return {};
++      }
++    }
++
++    auto is_blacklisted = [&](const net::network_adapter_t &adapter) {
++      if (!blacklist) {
++        return false;
++      }
++
++      return std::regex_search(adapter.name, *blacklist) ||
++             std::regex_search(adapter.id, *blacklist) ||
++             std::regex_search(adapter.description, *blacklist);
++    };
++
++    auto add_adapter = [&](const net::network_adapter_t &adapter) {
++      if (is_blacklisted(adapter)) {
++        BOOST_LOG(debug) << "Skipping blacklisted UPnP adapter: "sv << adapter.name;
++        return;
++      }
++
++      if (!adapter_is_eligible(adapter)) {
++        BOOST_LOG(debug) << "Skipping ineligible UPnP adapter: "sv << adapter.name;
++        return;
++      }
++
++      for (const auto &address : adapter.ipv4_addresses) {
++        if (!seen_addresses.insert(address).second) {
++          continue;
++        }
++
++        targets.emplace_back(discovery_target_t {adapter.name, adapter.id, address});
++      }
++    };
++
++    if (!config::sunshine.upnp_adapters.empty()) {
++      for (const auto &selector : config::sunshine.upnp_adapters) {
++        bool matched = false;
++        for (const auto &adapter : adapters) {
++          if (!adapter_matches_selector(adapter, selector)) {
++            continue;
++          }
++
++          matched = true;
++          add_adapter(adapter);
++        }
++
++        if (!matched) {
++          BOOST_LOG(warning) << "Configured UPnP adapter was not found: "sv << selector;
++        }
++      }
++    } else {
++      for (const auto &adapter : adapters) {
++        add_adapter(adapter);
++      }
++    }
++
++    return targets;
++  }
+@@ -1,1 +1,1 @@
+   int UPNP_GetValidIGDStatus(device_t &device, urls_t *urls, IGDdatas *data, std::array<char, INET6_ADDRESS_STRLEN> &lan_addr) {
+ #if (MINIUPNPC_API_VERSION >= 18)
+     return UPNP_GetValidIGD(device.get(), &urls->el, data, lan_addr.data(), (int) lan_addr.size(), nullptr, 0);
+ #else
+     return UPNP_GetValidIGD(device.get(), &urls->el, data, lan_addr.data(), (int) lan_addr.size());
+ #endif
+   }
++
++  static bool discover_ipv4_igd(const char *multicast_interface,
++                                const std::string_view adapter_label,
++                                urls_t &urls,
++                                IGDdatas &data,
++                                std::array<char, INET6_ADDRESS_STRLEN> &lan_addr) {
++    int err = 0;
++    device_t device {upnpDiscover(2000, multicast_interface, nullptr, 0, IPv4, 2, &err)};
++    if (!device || err) {
++      BOOST_LOG(debug) << "No IPv4 UPnP device discovered via adapter ["sv << adapter_label << ']';
++      return false;
++    }
++
++    for (auto dev = device.get(); dev != nullptr; dev = dev->pNext) {
++      BOOST_LOG(debug) << "Found UPnP device via adapter ["sv << adapter_label << "]: "sv << dev->descURL;
++    }
++
++    urls_t candidate_urls;
++    IGDdatas candidate_data {};
++    std::array<char, INET6_ADDRESS_STRLEN> candidate_lan_addr {};
++    const auto status = upnp::UPNP_GetValidIGDStatus(device, &candidate_urls, &candidate_data, candidate_lan_addr);
++    if (status != 1 && status != 2) {
++      BOOST_LOG(debug) << "No valid IPv4 IGD via adapter ["sv << adapter_label << "]: "sv << status_string(status);
++      return false;
++    }
++
++    urls = std::move(candidate_urls);
++    data = candidate_data;
++    lan_addr = candidate_lan_addr;
++    return true;
++  }
+@@ -1,1 +1,1 @@
+     void upnp_thread_proc() {
+       platf::set_thread_name("upnp");
+       auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+       bool mapped = false;
+       IGDdatas data;
+       urls_t mapped_urls;
+       auto address_family = net::af_from_enum_string(config::sunshine.address_family);
++      const bool adapter_filter_enabled =
++        !config::sunshine.upnp_adapters.empty() ||
++        !config::sunshine.upnp_adapter_blacklist.empty();
+ 
+       // Refresh UPnP rules every few minutes. They can be lost if the router reboots,
+       // WAN IP address changes, or various other conditions.
+       do {
+-        int err = 0;
+-        device_t device {upnpDiscover(2000, nullptr, nullptr, 0, IPv4, 2, &err)};
+-        if (!device || err) {
+-          BOOST_LOG(warning) << "Couldn't discover any IPv4 UPNP devices"sv;
+-          mapped = false;
+-          continue;
+-        }
+-
+-        for (auto dev = device.get(); dev != nullptr; dev = dev->pNext) {
+-          BOOST_LOG(debug) << "Found device: "sv << dev->descURL;
+-        }
+-
+-        std::array<char, INET6_ADDRESS_STRLEN> lan_addr;
+-
+         urls_t urls;
+-        auto status = upnp::UPNP_GetValidIGDStatus(device, &urls, &data, lan_addr);
+-        if (status != 1 && status != 2) {
+-          BOOST_LOG(error) << status_string(status);
++        std::array<char, INET6_ADDRESS_STRLEN> lan_addr {};
++        bool discovered = false;
++        std::string selected_adapter;
++
++        if (!adapter_filter_enabled) {
++          discovered = discover_ipv4_igd(nullptr, "automatic"sv, urls, data, lan_addr);
++        } else {
++          const auto targets = get_ipv4_discovery_targets();
++          for (const auto &target : targets) {
++            const auto label = target.adapter_name.empty() ? target.adapter_id : target.adapter_name;
++            BOOST_LOG(debug) << "Trying IPv4 UPnP discovery on adapter ["sv << label
++                             << "] at ["sv << target.address << ']';
++
++            if (discover_ipv4_igd(target.address.c_str(), label, urls, data, lan_addr)) {
++              selected_adapter = label;
++              discovered = true;
++              break;
++            }
++          }
++        }
++
++        if (!discovered) {
++          BOOST_LOG(warning) << "Couldn't discover any IPv4 UPNP devices"sv;
+           mapped = false;
+           continue;
+         }
+ 
+         std::string lan_addr_str {lan_addr.data()};
+@@ -1,1 +1,1 @@
+         if (!mapped) {
+           BOOST_LOG(info) << "Completed UPnP port mappings to "sv << lan_addr_str << " via "sv << urls->rootdescURL;
++          if (!selected_adapter.empty()) {
++            BOOST_LOG(info) << "UPnP discovery adapter: "sv << selected_adapter;
++          }
+         }
+diff --git a/src/confighttp.cpp b/src/confighttp.cpp
+--- a/src/confighttp.cpp
++++ b/src/confighttp.cpp
+@@ -1,1 +1,1 @@
+   /**
++   * @brief Get the host network adapters available for UPnP discovery.
++   * @param response The HTTP response object.
++   * @param request The HTTP request object.
++   *
++   * @api_examples{/api/network-adapters| GET| null}
++   */
++  void getNetworkAdapters(const resp_https_t &response, const req_https_t &request) {
++    if (!authenticate(response, request)) {
++      return;
++    }
++
++    print_req(request);
++
++    nlohmann::json output_tree;
++    output_tree["status"] = true;
++    output_tree["adapters"] = nlohmann::json::array();
++
++    for (const auto &adapter : net::get_network_adapters()) {
++      nlohmann::json entry;
++      entry["name"] = adapter.name;
++      entry["id"] = adapter.id;
++      entry["description"] = adapter.description;
++      entry["ipv4"] = adapter.ipv4_addresses;
++      entry["is_up"] = adapter.is_up;
++      entry["is_loopback"] = adapter.is_loopback;
++      entry["supports_multicast"] = adapter.supports_multicast;
++      output_tree["adapters"].push_back(std::move(entry));
++    }
++
++    send_response(response, output_tree);
++  }
++
++  /**
+    * @brief Get the configuration settings.
+@@ -1,1 +1,1 @@
+     server.resource["^/api/clients/update$"]["POST"] = updateClient;
++    server.resource["^/api/network-adapters$"]["GET"] = getNetworkAdapters;
+     server.resource["^/api/config$"]["GET"] = getConfig;
+diff --git a/src_assets/common/assets/web/config.html b/src_assets/common/assets/web/config.html
+--- a/src_assets/common/assets/web/config.html
++++ b/src_assets/common/assets/web/config.html
+@@ -1,1 +1,1 @@
+             name: "Network",
+             options: {
+               "upnp": "disabled",
++              "upnp_adapters": "",
++              "upnp_adapter_blacklist": "",
+               "address_family": "ipv4",
+               "bind_address": "",
+diff --git a/src_assets/common/assets/web/configs/tabs/Network.vue b/src_assets/common/assets/web/configs/tabs/Network.vue
+--- a/src_assets/common/assets/web/configs/tabs/Network.vue
++++ b/src_assets/common/assets/web/configs/tabs/Network.vue
+@@ -1,1 +1,1 @@
+-<script setup>
+-import { computed, ref } from 'vue'
++<script setup>
++import { computed, onMounted, ref } from 'vue'
+@@ -1,1 +1,1 @@
+ const config = ref(props.config)
+ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort)
++const networkAdapters = ref([])
++
++const parseUpnpAdapters = () => String(config.value?.upnp_adapters ?? '')
++  .split(',')
++  .map((value) => value.trim())
++  .filter(Boolean)
++
++const isUpnpAdapterSelected = (adapter) => {
++  const values = parseUpnpAdapters()
++  return values.includes(adapter.name) || (adapter.id && values.includes(adapter.id))
++}
++
++const setUpnpAdapterSelected = (adapter, selected) => {
++  const aliases = new Set([adapter.name, adapter.id].filter(Boolean))
++  let values = parseUpnpAdapters().filter((value) => !aliases.has(value))
++  if (selected) {
++    values.push(adapter.name || adapter.id)
++  }
++  config.value.upnp_adapters = [...new Set(values)].join(',')
++}
++
++onMounted(async () => {
++  try {
++    const response = await fetch('./api/network-adapters')
++    if (!response.ok) {
++      return
++    }
++    const body = await response.json()
++    networkAdapters.value = Array.isArray(body.adapters) ? body.adapters : []
++  } catch {
++    networkAdapters.value = []
++  }
++})
+ </script>
+@@ -1,1 +1,1 @@
+     <Checkbox class="mb-3"
+               id="upnp"
+               locale-prefix="config"
+               v-model="config.upnp"
+               default="false"
+     ></Checkbox>
++
++    <!-- UPnP adapter filter -->
++    <div class="mb-3">
++      <label for="upnp_adapters" class="form-label">{{ $t('config.upnp_adapters') }}</label>
++
++      <div class="border rounded p-2 mb-2" v-if="networkAdapters.length">
++        <div class="form-check mb-2"
++             v-for="(adapter, index) in networkAdapters"
++             :key="adapter.id || adapter.name || index">
++          <input class="form-check-input"
++                 type="checkbox"
++                 :id="`upnp_adapter_${index}`"
++                 :checked="isUpnpAdapterSelected(adapter)"
++                 @change="setUpnpAdapterSelected(adapter, $event.target.checked)" />
++          <label class="form-check-label" :for="`upnp_adapter_${index}`">
++            {{ adapter.name || adapter.id }}
++            <span class="text-muted ms-1" v-if="adapter.ipv4?.length">
++              ({{ adapter.ipv4.join(', ') }})
++            </span>
++          </label>
++          <div class="form-text mt-0"
++               v-if="adapter.description && adapter.description !== adapter.name">
++            {{ adapter.description }}
++          </div>
++        </div>
++      </div>
++      <div class="form-text mb-2" v-else>{{ $t('config.upnp_adapters_none') }}</div>
++
++      <input type="text"
++             class="form-control"
++             id="upnp_adapters"
++             v-model="config.upnp_adapters"
++             placeholder="Wi-Fi,Ethernet" />
++      <div class="form-text">{{ $t('config.upnp_adapters_desc') }}</div>
++    </div>
++
++    <div class="mb-3">
++      <label for="upnp_adapter_blacklist" class="form-label">{{ $t('config.upnp_adapter_blacklist') }}</label>
++      <input type="text"
++             class="form-control"
++             id="upnp_adapter_blacklist"
++             v-model="config.upnp_adapter_blacklist"
++             placeholder="Mihomo|Clash|Wintun" />
++      <div class="form-text">{{ $t('config.upnp_adapter_blacklist_desc') }}</div>
++    </div>
+ 
+     <!-- Address family -->
+diff --git a/src_assets/common/assets/web/public/assets/locale/en.json b/src_assets/common/assets/web/public/assets/locale/en.json
+--- a/src_assets/common/assets/web/public/assets/locale/en.json
++++ b/src_assets/common/assets/web/public/assets/locale/en.json
+@@ -1,1 +1,1 @@
+     "touchpad_as_ds4": "Emulate a PlayStation-style gamepad if the client gamepad reports a touchpad is present",
+     "touchpad_as_ds4_desc": "If disabled, touchpad presence will not be taken into account during gamepad type selection.",
+     "upnp": "UPnP",
++    "upnp_adapter_blacklist": "UPnP Adapter Blacklist",
++    "upnp_adapter_blacklist_desc": "Optional regular expression applied to adapter name, native ID, and description. Matching adapters are never used for IPv4 UPnP discovery. The blacklist takes precedence over explicit selections.",
++    "upnp_adapters": "UPnP Network Adapters",
++    "upnp_adapters_desc": "Comma-separated candidate adapter names, native IDs, or currently assigned IPv4 addresses. Select one or more adapters above or enter values manually. The first candidate that discovers a valid IGD is used. Leave empty for the legacy automatic interface selection unless a blacklist is configured.",
++    "upnp_adapters_none": "No adapters were enumerated. Adapter names or IDs can still be entered manually.",
+     "upnp_desc": "Automatically configure port forwarding for streaming over the Internet",
+diff --git a/src_assets/common/assets/web/public/assets/locale/zh.json b/src_assets/common/assets/web/public/assets/locale/zh.json
+--- a/src_assets/common/assets/web/public/assets/locale/zh.json
++++ b/src_assets/common/assets/web/public/assets/locale/zh.json
+@@ -1,1 +1,1 @@
+     "touchpad_as_ds4": "如果客户端报告游戏手柄存在触摸板，则模拟一个 DS4 游戏手柄",
+     "touchpad_as_ds4_desc": "如果禁用，则在选择游戏手柄类型时不会考虑触摸板的存在。",
+     "upnp": "UPnP",
++    "upnp_adapter_blacklist": "UPnP 网卡黑名单",
++    "upnp_adapter_blacklist_desc": "可选的正则表达式，会匹配网卡名称、原生 ID 和描述。匹配的网卡不会用于 IPv4 UPnP 发现；黑名单优先于显式选择。",
++    "upnp_adapters": "UPnP 网络适配器",
++    "upnp_adapters_desc": "以逗号分隔的候选网卡名称、原生 ID 或当前 IPv4 地址。可以在上方单选/多选，也可以手动填写。Sunshine 使用第一个能够发现有效 IGD 的候选网卡。留空时保持原有自动选择行为；若配置了黑名单，则会在未被屏蔽的网卡中自动尝试。",
++    "upnp_adapters_none": "未能枚举网卡；仍可手动填写网卡名称或 ID。",
+     "upnp_desc": "为公网串流自动配置端口转发",
+diff --git a/docs/configuration.md b/docs/configuration.md
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -1,1 +1,1 @@
+ ### upnp
+@@ -1,1 +1,1 @@
+ </table>
+ 
++### upnp_adapters
++
++<table>
++    <tr>
++        <td>Description</td>
++        <td colspan="2">
++            Comma-separated list of network adapter names, native adapter IDs, or currently assigned IPv4
++            addresses to use for IPv4 UPnP discovery. Sunshine tries the configured candidates in order and
++            uses the first one that discovers a valid IGD. Explicit selection is strict: if none of the
++            configured adapters is available, Sunshine does not silently fall back to another interface.
++        </td>
++    </tr>
++    <tr>
++        <td>Default</td>
++        <td colspan="2">Empty. MiniUPnPc/OS automatic interface selection is used.</td>
++    </tr>
++    <tr>
++        <td>Example</td>
++        <td colspan="2">@code{}
++            upnp_adapters = Wi-Fi,Ethernet
++            @endcode</td>
++    </tr>
++</table>
++
++### upnp_adapter_blacklist
++
++<table>
++    <tr>
++        <td>Description</td>
++        <td colspan="2">
++            Optional regular expression applied to the adapter name, native ID, and description before IPv4
++            UPnP discovery. Matching adapters are excluded. The blacklist takes precedence over
++            <code>upnp_adapters</code>. If the allow-list is empty but a blacklist is configured, Sunshine
++            enumerates eligible host adapters and tries only the non-blacklisted ones.
++        </td>
++    </tr>
++    <tr>
++        <td>Default</td>
++        <td colspan="2">Empty.</td>
++    </tr>
++    <tr>
++        <td>Example</td>
++        <td colspan="2">@code{}
++            upnp_adapter_blacklist = Mihomo|Clash|Wintun
++            @endcode</td>
++    </tr>
++</table>
++
+ ### address_family

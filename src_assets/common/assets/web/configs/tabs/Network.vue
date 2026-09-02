@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   Info,
   TriangleAlert,
@@ -15,6 +15,58 @@ const defaultMoonlightPort = 47989
 
 const config = ref(props.config)
 const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort)
+const networkAdapters = ref([])
+
+const parseUpnpAdapters = () => {
+  const value = config.value?.upnp_adapters
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean)
+  }
+
+  return String(value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+const adapterAliases = (adapter) => [
+  adapter.name,
+  adapter.id,
+  ...(Array.isArray(adapter.ipv4) ? adapter.ipv4 : []),
+].filter(Boolean)
+
+const isUpnpAdapterSelected = (adapter) => {
+  const values = parseUpnpAdapters()
+  return adapterAliases(adapter).some((alias) => values.includes(alias))
+}
+
+const setUpnpAdapterSelected = (adapter, selected) => {
+  const aliases = new Set(adapterAliases(adapter))
+  const values = parseUpnpAdapters().filter((value) => !aliases.has(value))
+
+  if (selected) {
+    const value = adapter.name || adapter.id || adapter.ipv4?.[0]
+    if (value) {
+      values.push(value)
+    }
+  }
+
+  config.value.upnp_adapters = [...new Set(values)].join(',')
+}
+
+onMounted(async () => {
+  try {
+    const response = await fetch('./api/network-adapters')
+    if (!response.ok) {
+      return
+    }
+
+    const body = await response.json()
+    networkAdapters.value = Array.isArray(body.adapters) ? body.adapters : []
+  } catch {
+    networkAdapters.value = []
+  }
+})
 </script>
 
 <template>
@@ -26,6 +78,55 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
               v-model="config.upnp"
               default="false"
     ></Checkbox>
+
+    <!-- UPnP adapter filter -->
+    <div class="mb-3">
+      <label for="upnp_adapters" class="form-label">{{ $t('config.upnp_adapters') }}</label>
+
+      <div class="border rounded p-2 mb-2" v-if="networkAdapters.length">
+        <div class="form-check mb-2"
+             v-for="(adapter, index) in networkAdapters"
+             :key="adapter.id || adapter.name || index">
+          <input class="form-check-input"
+                 type="checkbox"
+                 :id="`upnp_adapter_${index}`"
+                 :checked="isUpnpAdapterSelected(adapter)"
+                 @change="setUpnpAdapterSelected(adapter, $event.target.checked)" />
+          <label class="form-check-label" :for="`upnp_adapter_${index}`">
+            <span :class="{ 'text-muted': !adapter.eligible }">
+              {{ adapter.name || adapter.id }}
+              <span class="ms-1" v-if="adapter.ipv4?.length">({{ adapter.ipv4.join(', ') }})</span>
+              <span class="ms-1" v-if="!adapter.eligible">— {{ $t('config.upnp_adapters_ineligible') }}</span>
+            </span>
+          </label>
+          <div class="form-text mt-0" v-if="adapter.id && adapter.id !== adapter.name">
+            {{ $t('config.upnp_adapter_native_id') }}: <code>{{ adapter.id }}</code>
+          </div>
+          <div class="form-text mt-0"
+               v-if="adapter.description && adapter.description !== adapter.name">
+            {{ adapter.description }}
+          </div>
+        </div>
+      </div>
+      <div class="form-text mb-2" v-else>{{ $t('config.upnp_adapters_none') }}</div>
+
+      <input type="text"
+             class="form-control"
+             id="upnp_adapters"
+             v-model="config.upnp_adapters"
+             placeholder="Wi-Fi,Ethernet,IPv4-address" />
+      <div class="form-text">{{ $t('config.upnp_adapters_desc') }}</div>
+    </div>
+
+    <div class="mb-3">
+      <label for="upnp_adapter_blacklist" class="form-label">{{ $t('config.upnp_adapter_blacklist') }}</label>
+      <input type="text"
+             class="form-control"
+             id="upnp_adapter_blacklist"
+             v-model="config.upnp_adapter_blacklist"
+             placeholder="Mihomo|Clash|TUN|TAP" />
+      <div class="form-text">{{ $t('config.upnp_adapter_blacklist_desc') }}</div>
+    </div>
 
     <!-- Address family -->
     <div class="mb-3">

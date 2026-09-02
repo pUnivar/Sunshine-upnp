@@ -62,6 +62,13 @@ const std::string APPS_JSON_PATH = platf::appdata().string() + "/apps.json";  //
 
 namespace config {
 
+#ifdef _WIN32
+  // Local fork default derived from the adapters present on the validation host. The upstreamable default is empty.
+  constexpr auto local_upnp_adapter_blacklist = "Mihomo|Meta Tunnel|Netease UU|TAP-Win32|Hyper-V|vEthernet";
+#else
+  constexpr auto local_upnp_adapter_blacklist = "";
+#endif
+
   namespace nv {
 
     /**
@@ -879,6 +886,8 @@ namespace config {
     47989,  // Base port number
     "ipv4",  // Address family
     {},  // Bind address
+    {},  // UPnP adapters (empty keeps legacy automatic interface selection)
+    local_upnp_adapter_blacklist,  // UPnP adapter blacklist
     platf::appdata().string() + "/sunshine.log",  // log file
     false,  // notify_pre_releases
     true,  // system_tray
@@ -986,6 +995,11 @@ namespace config {
     auto begin_val = std::find_if_not(eq + 1, endc, space_tab);
 
     if (begin_val == endl) {
+      const auto name = to_string(begin, end_name);
+      if (name == "upnp_adapter_blacklist") {
+        // An explicit empty blacklist disables the local host default. Other empty values retain legacy parsing.
+        return std::make_pair(endl, std::make_pair(name, std::string {}));
+      }
       return std::make_pair(endl, std::nullopt);
     }
 
@@ -1103,11 +1117,11 @@ namespace config {
     std::string temp;
     string_f(vars, name, temp);
 
+    output.clear();
     if (temp.empty()) {
       return;
     }
 
-    output.clear();
     std::stringstream ss(temp);
     std::string item;
     while (std::getline(ss, item, ',')) {
@@ -1820,6 +1834,8 @@ namespace config {
 
     string_restricted_f(vars, "address_family", sunshine.address_family, {"ipv4"sv, "both"sv});
     string_f(vars, "bind_address", sunshine.bind_address);
+    string_list_f(vars, "upnp_adapters", sunshine.upnp_adapters);
+    string_f(vars, "upnp_adapter_blacklist", sunshine.upnp_adapter_blacklist);
 
     bool upnp = false;
     bool_f(vars, "upnp"s, upnp);

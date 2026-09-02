@@ -1372,6 +1372,41 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get the host network adapters available for UPnP discovery.
+   *
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/network-adapters| GET| null}
+   */
+  void getNetworkAdapters(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["adapters"] = nlohmann::json::array();
+
+    for (const auto &adapter : net::get_network_adapters()) {
+      nlohmann::json entry;
+      entry["name"] = adapter.name;
+      entry["id"] = adapter.id;
+      entry["description"] = adapter.description;
+      entry["ipv4"] = adapter.ipv4_addresses;
+      entry["is_up"] = adapter.is_up;
+      entry["is_loopback"] = adapter.is_loopback;
+      entry["supports_multicast"] = adapter.supports_multicast;
+      entry["eligible"] = net::is_network_adapter_eligible(adapter);
+      output_tree["adapters"].push_back(std::move(entry));
+    }
+
+    send_response(response, output_tree);
+  }
+
+  /**
    * @brief Get the configuration settings.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -1394,6 +1429,11 @@ namespace confighttp {
 
     for (auto &[name, value] : vars) {
       output_tree[name] = std::move(value);
+    }
+
+    // Return the effective local default when the option is not explicitly present in the file.
+    if (!output_tree.contains("upnp_adapter_blacklist")) {
+      output_tree["upnp_adapter_blacklist"] = config::sunshine.upnp_adapter_blacklist;
     }
 
     send_response(response, output_tree);
@@ -1455,7 +1495,9 @@ namespace confighttp {
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
       for (const auto &[k, v] : input_tree.items()) {
-        if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
+        // An explicit empty blacklist is meaningful on this fork: it disables the local default.
+        const bool preserve_empty_value = k == "upnp_adapter_blacklist";
+        if (v.is_null() || (v.is_string() && v.get<std::string>().empty() && !preserve_empty_value)) {
           continue;
         }
 
@@ -2210,6 +2252,7 @@ namespace confighttp {
     server.resource["^/api/clients/unpair$"]["POST"] = unpair;
     server.resource["^/api/clients/unpair-all$"]["POST"] = unpairAll;
     server.resource["^/api/clients/update$"]["POST"] = updateClient;
+    server.resource["^/api/network-adapters$"]["GET"] = getNetworkAdapters;
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/config$"]["POST"] = saveConfig;
     server.resource["^/api/configLocale$"]["GET"] = getLocale;

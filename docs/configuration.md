@@ -1474,6 +1474,59 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### upnp_adapters
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Comma-separated list of network adapter names, native adapter IDs, or currently assigned IPv4
+            addresses to use for IPv4 UPnP discovery. Sunshine tries the configured candidates in order and
+            uses the first one that discovers a valid IGD. Explicit selection is strict: if a configured
+            adapter is missing or unavailable, Sunshine does not fall back to an unselected interface.
+            Leave this empty to use all eligible adapters when a blacklist is configured.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">Empty. With no blacklist, MiniUPnPc/OS automatic interface selection is used.</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            upnp_adapters = Ethernet,Wi-Fi
+            @endcode</td>
+    </tr>
+</table>
+
+### upnp_adapter_blacklist
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Optional case-insensitive regular expression applied to the adapter friendly name, native ID, and
+            description before IPv4 UPnP discovery. Matching adapters are excluded and the blacklist takes
+            precedence over <code>upnp_adapters</code>. If <code>upnp_adapters</code> is empty, Sunshine tries
+            each remaining eligible adapter. Set an explicit empty value to clear the local default.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">
+            This Windows fork defaults to
+            <code>Mihomo|Meta Tunnel|Netease UU|TAP-Win32|Hyper-V|vEthernet</code>, based on the validation
+            host's actual adapters. The upstreamable default is empty.
+        </td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            upnp_adapter_blacklist = Mihomo|Clash|TUN|TAP
+            @endcode</td>
+    </tr>
+</table>
+
 ### address_family
 
 <table>

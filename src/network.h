@@ -5,8 +5,11 @@
 #pragma once
 
 // standard includes
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -63,6 +66,34 @@ namespace net {
     IPV4,  ///< IPv4 only
     BOTH  ///< IPv4 and IPv6
   };
+
+  /**
+   * @brief Network adapter information used for interface-aware discovery.
+   */
+  struct network_adapter_t {
+    std::string name;  ///< Human-readable interface name.
+    std::string id;  ///< Native or stable interface identifier where available.
+    std::string description;  ///< Platform-provided adapter description.
+    std::vector<std::string> ipv4_addresses;  ///< IPv4 unicast addresses currently assigned to the adapter.
+    bool is_up {false};  ///< Whether the adapter is operational.
+    bool is_loopback {false};  ///< Whether this is a loopback adapter.
+    bool supports_multicast {false};  ///< Whether the adapter supports multicast.
+  };
+
+  /**
+   * @brief Enumerate host network adapters.
+   *
+   * @return Current adapters and their IPv4 addresses.
+   */
+  std::vector<network_adapter_t> get_network_adapters();
+
+  /**
+   * @brief Check whether an adapter is suitable for IPv4 multicast discovery.
+   *
+   * @param adapter Adapter information to validate.
+   * @return `true` when the adapter is operational, non-loopback, has an IPv4 address, and supports multicast.
+   */
+  bool is_network_adapter_eligible(const network_adapter_t &adapter);
 
   /**
    * @brief Convert configuration text to a network enum value.

@@ -4,6 +4,7 @@ set(CMAKE_FIND_LIBRARY_SUFFIXES ".dll")
 find_library(ZLIB ZLIB1)
 list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
         $<TARGET_OBJECTS:sunshine_rc_object>
+        Iphlpapi.lib
         Windowsapp.lib
         Wtsapi32.lib
         version.lib)

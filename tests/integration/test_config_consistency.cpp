@@ -49,7 +49,7 @@ protected:
 
     // Regex patterns to match different config option types in config.cpp
     const std::vector patterns = {
-      std::regex(R"DELIM((?:string_f|path_f|string_restricted_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
+      std::regex(R"DELIM((?:string_f|path_f|string_restricted_f|string_list_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM((?:int_f|int_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM(bool_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM((?:double_f|double_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),

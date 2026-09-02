@@ -4,13 +4,29 @@
  */
 // standard includes
 #include <algorithm>
+#include <memory>
 #include <sstream>
+#include <unordered_map>
 
 // local includes
 #include "config.h"
 #include "logging.h"
 #include "network.h"
 #include "utility.h"
+
+#ifdef _WIN32
+  // platform includes
+  #include <iphlpapi.h>
+  #include <ws2tcpip.h>
+
+  // local includes
+  #include "platform/windows/utf_utils.h"
+#else
+  // platform includes
+  #include <arpa/inet.h>
+  #include <ifaddrs.h>
+  #include <net/if.h>
+#endif
 
 using namespace std::literals;
 
@@ -47,6 +63,117 @@ namespace net {
     ip::make_network_v6("fc00::/7"sv),
     ip::make_network_v6("fe80::/64"sv),
   };
+
+  std::vector<network_adapter_t> get_network_adapters() {
+    std::vector<network_adapter_t> adapters;
+
+#ifdef _WIN32
+    constexpr ULONG flags = GAA_FLAG_INCLUDE_PREFIX;
+    ULONG buffer_size = 0;
+    // AF_UNSPEC keeps adapters without IPv4 visible to the Web UI; their eligibility is evaluated below.
+    auto result = GetAdaptersAddresses(AF_UNSPEC, flags, nullptr, nullptr, &buffer_size);
+    if (result != ERROR_BUFFER_OVERFLOW || buffer_size == 0) {
+      if (result != NO_ERROR && result != ERROR_NO_DATA) {
+        BOOST_LOG(warning) << "GetAdaptersAddresses() failed while sizing the adapter buffer: "sv << result;
+      }
+      return adapters;
+    }
+
+    std::vector<unsigned char> buffer(buffer_size);
+    auto *addresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+    result = GetAdaptersAddresses(AF_UNSPEC, flags, nullptr, addresses, &buffer_size);
+    if (result != NO_ERROR) {
+      BOOST_LOG(warning) << "GetAdaptersAddresses() failed: "sv << result;
+      return adapters;
+    }
+
+    for (auto *current = addresses; current != nullptr; current = current->Next) {
+      network_adapter_t adapter;
+      if (current->FriendlyName != nullptr) {
+        adapter.name = utf_utils::to_utf8(std::wstring {current->FriendlyName});
+      }
+      if (current->AdapterName != nullptr) {
+        adapter.id = current->AdapterName;
+      }
+      if (current->Description != nullptr) {
+        adapter.description = utf_utils::to_utf8(std::wstring {current->Description});
+      }
+      if (adapter.name.empty()) {
+        adapter.name = adapter.id;
+      }
+
+      adapter.is_up = current->OperStatus == IfOperStatusUp;
+      adapter.is_loopback = current->IfType == IF_TYPE_SOFTWARE_LOOPBACK;
+      adapter.supports_multicast = (current->Flags & IP_ADAPTER_NO_MULTICAST) == 0;
+
+      for (auto *unicast = current->FirstUnicastAddress; unicast != nullptr; unicast = unicast->Next) {
+        if (unicast->Address.lpSockaddr == nullptr || unicast->Address.lpSockaddr->sa_family != AF_INET) {
+          continue;
+        }
+
+        // Do not expose addresses that Windows has not completed duplicate-address detection for.
+        if (unicast->DadState == IpDadStateInvalid || unicast->DadState == IpDadStateTentative || unicast->DadState == IpDadStateDuplicate) {
+          continue;
+        }
+
+        const auto *sockaddr = reinterpret_cast<const SOCKADDR_IN *>(unicast->Address.lpSockaddr);
+        char address[INET_ADDRSTRLEN] {};
+        if (InetNtopA(AF_INET, &sockaddr->sin_addr, address, sizeof(address)) != nullptr) {
+          adapter.ipv4_addresses.emplace_back(address);
+        }
+      }
+
+      adapters.emplace_back(std::move(adapter));
+    }
+#else
+    ifaddrs *raw_addresses = nullptr;
+    if (getifaddrs(&raw_addresses) != 0 || raw_addresses == nullptr) {
+      BOOST_LOG(warning) << "getifaddrs() failed while enumerating network adapters"sv;
+      return adapters;
+    }
+    std::unique_ptr<ifaddrs, decltype(&freeifaddrs)> addresses {raw_addresses, freeifaddrs};
+
+    std::unordered_map<std::string, std::size_t> adapter_indexes;
+    for (auto *current = raw_addresses; current != nullptr; current = current->ifa_next) {
+      if (current->ifa_name == nullptr) {
+        continue;
+      }
+
+      const std::string name {current->ifa_name};
+      auto [index_it, inserted] = adapter_indexes.try_emplace(name, adapters.size());
+      if (inserted) {
+        network_adapter_t adapter;
+        adapter.name = name;
+        adapter.id = name;
+        adapters.emplace_back(std::move(adapter));
+      }
+
+      auto &adapter = adapters[index_it->second];
+      adapter.is_up = adapter.is_up || ((current->ifa_flags & IFF_UP) != 0);
+      adapter.is_loopback = adapter.is_loopback || ((current->ifa_flags & IFF_LOOPBACK) != 0);
+      adapter.supports_multicast = adapter.supports_multicast || ((current->ifa_flags & IFF_MULTICAST) != 0);
+
+      if (current->ifa_addr == nullptr || current->ifa_addr->sa_family != AF_INET) {
+        continue;
+      }
+
+      const auto *sockaddr = reinterpret_cast<const sockaddr_in *>(current->ifa_addr);
+      char address[INET_ADDRSTRLEN] {};
+      if (inet_ntop(AF_INET, &sockaddr->sin_addr, address, sizeof(address)) != nullptr) {
+        adapter.ipv4_addresses.emplace_back(address);
+      }
+    }
+#endif
+
+    return adapters;
+  }
+
+  bool is_network_adapter_eligible(const network_adapter_t &adapter) {
+    return adapter.is_up &&
+           !adapter.is_loopback &&
+           adapter.supports_multicast &&
+           !adapter.ipv4_addresses.empty();
+  }
 
   /**
    * @brief Convert configuration text to a network enum value.

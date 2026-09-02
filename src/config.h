@@ -366,6 +366,8 @@ namespace config {
     std::uint16_t port;  ///< TCP port used by Sunshine services.
     std::string address_family;  ///< Address family requested for listening sockets.
     std::string bind_address;  ///< Local address Sunshine should bind to.
+    std::vector<std::string> upnp_adapters;  ///< Candidate adapters used for IPv4 UPnP discovery.
+    std::string upnp_adapter_blacklist;  ///< Optional regex excluding adapters from IPv4 UPnP discovery.
 
     std::string log_file;  ///< Path to the configured log file.
     bool notify_pre_releases;  ///< Notify users about pre-release updates.

@@ -4,7 +4,89 @@
  */
 #include "../tests_common.h"
 
+#include <src/config.h>
 #include <src/network.h>
+
+TEST(NetworkAdapterEligibilityTest, RequiresUsableMulticastIpv4Adapter) {
+  net::network_adapter_t adapter;
+  adapter.ipv4_addresses = {"192.0.2.10"};
+  adapter.is_up = true;
+  adapter.supports_multicast = true;
+
+  EXPECT_TRUE(net::is_network_adapter_eligible(adapter));
+
+  adapter.is_up = false;
+  EXPECT_FALSE(net::is_network_adapter_eligible(adapter));
+  adapter.is_up = true;
+
+  adapter.is_loopback = true;
+  EXPECT_FALSE(net::is_network_adapter_eligible(adapter));
+  adapter.is_loopback = false;
+
+  adapter.supports_multicast = false;
+  EXPECT_FALSE(net::is_network_adapter_eligible(adapter));
+  adapter.supports_multicast = true;
+
+  adapter.ipv4_addresses.clear();
+  EXPECT_FALSE(net::is_network_adapter_eligible(adapter));
+}
+
+struct NetworkAdapterEnumerationTest: BaseTest {};
+
+TEST_F(NetworkAdapterEnumerationTest, ReportsValidIpv4Text) {
+  const auto adapters = net::get_network_adapters();
+
+  for (const auto &adapter : adapters) {
+    for (const auto &address : adapter.ipv4_addresses) {
+      EXPECT_NO_THROW(boost::asio::ip::make_address_v4(address));
+    }
+  }
+}
+
+/**
+ * @brief Verifies UPnP adapter settings are parsed without leaking global test state.
+ */
+struct UpnpAdapterConfigTest: BaseTest {
+  void SetUp() override {
+    BaseTest::SetUp();
+    // The Windows test target uses a writable asset directory, but does not copy apps.json into it.
+    // Point the unrelated applications file at a source file before applying these settings.
+    config::stream.file_apps = SUNSHINE_SOURCE_DIR "/tests/unit/test_network.cpp";
+  }
+
+  void TearDown() override {
+    config::video = original_video;
+    config::audio = original_audio;
+    config::stream = original_stream;
+    config::nvhttp = original_nvhttp;
+    config::input = original_input;
+    config::sunshine = original_sunshine;
+    config::modified_config_settings = original_modified_config_settings;
+    BaseTest::TearDown();
+  }
+
+  config::video_t original_video {config::video};  ///< Video configuration restored after each test.
+  config::audio_t original_audio {config::audio};  ///< Audio configuration restored after each test.
+  config::stream_t original_stream {config::stream};  ///< Stream configuration restored after each test.
+  config::nvhttp_t original_nvhttp {config::nvhttp};  ///< HTTP configuration restored after each test.
+  config::input_t original_input {config::input};  ///< Input configuration restored after each test.
+  config::sunshine_t original_sunshine {config::sunshine};  ///< Core configuration restored after each test.
+  decltype(config::modified_config_settings) original_modified_config_settings {config::modified_config_settings};  ///< Modified settings restored after each test.
+};
+
+TEST_F(UpnpAdapterConfigTest, ParsesCommaSeparatedSelectorsAndBlacklist) {
+  config::apply_config_for_test("upnp_adapters = Ethernet, native-id, 192.0.2.10\nupnp_adapter_blacklist = mihomo|tun\n");
+
+  EXPECT_EQ((std::vector<std::string> {"Ethernet", "native-id", "192.0.2.10"}), config::sunshine.upnp_adapters);
+  EXPECT_EQ("mihomo|tun", config::sunshine.upnp_adapter_blacklist);
+}
+
+TEST_F(UpnpAdapterConfigTest, ExplicitEmptyBlacklistDisablesLocalDefault) {
+  config::sunshine.upnp_adapter_blacklist = "host-default";
+  config::apply_config_for_test("upnp_adapter_blacklist =\n");
+
+  EXPECT_TRUE(config::sunshine.upnp_adapter_blacklist.empty());
+}
 
 struct MdnsInstanceNameTest: BaseTest, testing::WithParamInterface<std::tuple<std::string, std::string>> {};
 

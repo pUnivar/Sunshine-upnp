@@ -269,6 +269,8 @@
             name: "Network",
             options: {
               "upnp": "disabled",
+              "upnp_adapters": "",
+              "upnp_adapter_blacklist": "",
               "address_family": "ipv4",
               "bind_address": "",
               "port": 47989,
@@ -506,7 +508,11 @@
             let delete_value = false
 
             // todo: add proper type checking
-            if (JSON.stringify(config[optionKey]) === JSON.stringify(tab.options[optionKey])) {
+            // An explicit empty blacklist disables the Windows fork's compiled local default.
+            // Preserve it so the backend can write `upnp_adapter_blacklist =` instead of
+            // silently restoring the host-specific default on the next restart.
+            if (optionKey !== "upnp_adapter_blacklist" &&
+                JSON.stringify(config[optionKey]) === JSON.stringify(tab.options[optionKey])) {
               delete_value = true
             }
 

@@ -20,11 +20,15 @@ set(WIX_TOOL_PATH "${CMAKE_BINARY_DIR}/.wix")
 file(MAKE_DIRECTORY ${WIX_TOOL_PATH})
 
 # Install WiX locally using dotnet
-execute_process(
-        COMMAND ${DOTNET_EXECUTABLE} tool install --tool-path ${WIX_TOOL_PATH} wix --version ${WIX_VERSION}
-        ERROR_VARIABLE WIX_INSTALL_OUTPUT
-        RESULT_VARIABLE WIX_INSTALL_RESULT
-)
+if(EXISTS "${WIX_TOOL_PATH}/wix.exe")
+    set(WIX_INSTALL_RESULT 0)
+else()
+    execute_process(
+            COMMAND ${DOTNET_EXECUTABLE} tool install --tool-path ${WIX_TOOL_PATH} wix --version ${WIX_VERSION}
+            ERROR_VARIABLE WIX_INSTALL_OUTPUT
+            RESULT_VARIABLE WIX_INSTALL_RESULT
+    )
+endif()
 
 if(NOT WIX_INSTALL_RESULT EQUAL 0)
     message(FATAL_ERROR "Failed to install WiX tools locally.
@@ -70,9 +74,15 @@ set(CPACK_WIX_PROGRAM_MENU_FOLDER "LizardByte")
 set(CPACK_WIX_PROPERTY_REINSTALLMODE "amus")
 
 set(CPACK_WIX_EXTENSIONS
-        "WixToolset.UI.wixext"
-        "WixToolset.Util.wixext"
+        "${WIX_TOOL_PATH}/extensions/WixToolset.UI.wixext/${WIX_UI_VERSION}/wixext4/WixToolset.UI.wixext.dll"
+        "${WIX_TOOL_PATH}/extensions/WixToolset.Util.wixext/${WIX_UI_VERSION}/wixext4/WixToolset.Util.wixext.dll"
 )
+# The UI extension is already supplied above by absolute path. Avoid CPack's
+# additional name-only UI extension, which cannot resolve the local tool cache.
+set(CPACK_WIX_SKIP_WIX_UI_EXTENSION TRUE)
+# The custom WiX template references the UI namespace explicitly. CPack only
+# expands this declaration when it is provided by the project configuration.
+set(CPACK_WIX_CUSTOM_XMLNS "ui=http://wixtoolset.org/schemas/v4/wxs/ui")
 
 message(STATUS "cpack package directory: ${CPACK_PACKAGE_DIRECTORY}")
 

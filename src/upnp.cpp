@@ -561,8 +561,8 @@ namespace upnp {
                          << "], controlURL ["sv << urls->controlURL << ']';
 
         if (!selected_adapter.empty()) {
-          BOOST_LOG(info) << "Selected UPnP adapter: name ["sv << selected_adapter
-                          << "], IPv4 ["sv << selected_adapter_address << ']';
+          BOOST_LOG(debug) << "Selected UPnP adapter: name ["sv << selected_adapter
+                           << "], IPv4 ["sv << selected_adapter_address << ']';
         }
 
         for (auto it = std::begin(mappings); it != std::end(mappings) && !shutdown_event->peek(); ++it) {
